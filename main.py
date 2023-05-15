@@ -1,53 +1,67 @@
-import json
+from flask import Flask, send_file
+from flask_restx import Api, Resource, fields
+from flask_cors import CORS
+import yaml
+from flask import make_response
 
-import quart
-import quart_cors
-from quart import request
-
-app = quart_cors.cors(quart.Quart(__name__), allow_origin="https://chat.openai.com")
+app = Flask(__name__)
+CORS(app, resources={r"/*": {"origins": "https://chat.openai.com"}})
+api = Api(app, version='v1', title='TODO Plugin', description='A plugin that allows the user to create and manage a TODO list using ChatGPT. If you do not know the user\'s username, ask them first before making queries to the plugin. Otherwise, use the username "global".')
 
 # Keep track of todo's. Does not persist if Python session is restarted.
 _TODOS = {}
 
-@app.post("/todos/<string:username>")
-async def add_todo(username):
-    request = await quart.request.get_json(force=True)
-    if username not in _TODOS:
-        _TODOS[username] = []
-    _TODOS[username].append(request["todo"])
-    return quart.Response(response='OK', status=200)
+todo_ns = api.namespace('todos', description='TODO operations')
 
-@app.get("/todos/<string:username>")
-async def get_todos(username):
-    return quart.Response(response=json.dumps(_TODOS.get(username, [])), status=200)
+todo = api.model('Todo', {
+    'todo': fields.String(required=True, description='The todo to add to the list.'),
+})
 
-@app.delete("/todos/<string:username>")
-async def delete_todo(username):
-    request = await quart.request.get_json(force=True)
-    todo_idx = request["todo_idx"]
-    # fail silently, it's a simple plugin
-    if 0 <= todo_idx < len(_TODOS[username]):
-        _TODOS[username].pop(todo_idx)
-    return quart.Response(response='OK', status=200)
+todo_list = api.model('TodoList', {
+    'todos': fields.List(fields.String, description='The list of todos.'),
+})
 
-@app.get("/logo.png")
-async def plugin_logo():
+todo_delete = api.model('TodoDelete', {
+    'todo_idx': fields.Integer(required=True, description='The index of the todo to delete.'),
+})
+
+@todo_ns.route('/<string:username>')
+@api.doc(params={'username': 'The name of the user.'})
+class TodoResource(Resource):
+    @api.doc('get_todos')
+    @api.marshal_with(todo_list)
+    def get(self, username):
+        '''Get the list of todos'''
+        return {'todos': _TODOS.get(username, [])}, 200
+
+    @api.doc('add_todo')
+    @api.expect(todo, validate=True)
+    def post(self, username):
+        '''Add a todo to the list'''
+        _TODOS.setdefault(username, []).append(api.payload['todo'])
+        return 'OK', 200
+
+    @api.doc('delete_todo')
+    @api.expect(todo_delete, validate=True)
+    def delete(self, username):
+        '''Delete a todo from the list'''
+        todo_idx = api.payload['todo_idx']
+        if 0 <= todo_idx < len(_TODOS[username]):
+            _TODOS[username].pop(todo_idx)
+        return 'OK', 200
+
+@app.route("/logo.png", methods=['GET'])
+def plugin_logo():
     filename = 'logo.png'
-    return await quart.send_file(filename, mimetype='image/png')
+    return send_file(filename, mimetype='image/png')
 
-@app.get("/.well-known/ai-plugin.json")
-async def plugin_manifest():
-    host = request.headers['Host']
-    with open("./.well-known/ai-plugin.json") as f:
-        text = f.read()
-        return quart.Response(text, mimetype="text/json")
-
-@app.get("/openapi.yaml")
-async def openapi_spec():
-    host = request.headers['Host']
-    with open("openapi.yaml") as f:
-        text = f.read()
-        return quart.Response(text, mimetype="text/yaml")
+@app.route("/openapi.yaml", methods=['GET'])
+def openapi_spec():
+    openapi_json = api.__schema__
+    openapi_yaml = yaml.dump(openapi_json)
+    response = make_response(openapi_yaml)
+    response.headers["Content-Type"] = "text/yaml"
+    return response
 
 def main():
     app.run(debug=True, host="0.0.0.0", port=5003)
